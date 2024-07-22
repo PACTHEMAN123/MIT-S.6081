@@ -119,6 +119,9 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  
+  // init trace mask
+  p->tm = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -291,6 +294,9 @@ fork(void)
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
+
+  // copy trace mask from parent to child.
+  np->tm = p->tm;
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
@@ -654,3 +660,18 @@ procdump(void)
     printf("\n");
   }
 }
+
+uint64
+nproc(void)
+{
+  struct proc *p;
+  uint64 num = 0;
+
+  for(p = proc; p < &proc[NPROC]; p++) {
+    if(p->state != UNUSED) {
+      num++;
+    }
+  }
+  return num;
+}
+

@@ -11,6 +11,15 @@
 
 void freerange(void *pa_start, void *pa_end);
 
+// collect amount of free bytes
+uint64 free_byte = 0;
+
+uint64
+get_fb()
+{
+  return free_byte;
+}
+
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
@@ -35,8 +44,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
     kfree(p);
+  }
+    
 }
 
 // Free the page of physical memory pointed at by v,
@@ -60,6 +71,7 @@ kfree(void *pa)
   r->next = kmem.freelist;
   kmem.freelist = r;
   release(&kmem.lock);
+  free_byte += PGSIZE;
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -78,5 +90,10 @@ kalloc(void)
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
+
+  if(r){
+    free_byte -= PGSIZE;
+  }
+
   return (void*)r;
 }

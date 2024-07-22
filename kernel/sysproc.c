@@ -6,6 +6,11 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
+
+struct sysinfo;
+uint64 get_fb(void);
+uint64 nproc(void);
 
 uint64
 sys_exit(void)
@@ -21,6 +26,42 @@ uint64
 sys_getpid(void)
 {
   return myproc()->pid;
+}
+
+uint64
+sys_trace(void)
+{
+  int n;
+  if(argint(0, &n) < 0)
+    return -1;
+  
+  myproc()->tm = n;
+  return 0;
+}
+
+uint64
+sys_sysinfo(void)
+{
+  uint64 si; // user pointer to struct sysinfo
+  struct proc *p = myproc();
+  struct sysinfo st;
+  st.freemem = get_fb();
+  st.nproc = nproc();
+  printf("freemem: [%d]\nnproc: [%d]\n", st.freemem, st.nproc);
+
+  if(argaddr(0, &si) < 0){
+    printf("argaddr failed\n");
+    return -1;
+  }
+
+  printf("user pointer: %x\n", si);
+
+  if(copyout(p->pagetable, si, (char *)&st, sizeof(st)) < 0){
+    printf("copyout failed\n");
+    return -1;
+  }
+
+  return 0;
 }
 
 uint64
