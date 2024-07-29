@@ -58,6 +58,8 @@ sys_sleep(void)
   int n;
   uint ticks0;
 
+  backtrace();
+
   if(argint(0, &n) < 0)
     return -1;
   acquire(&tickslock);
@@ -95,3 +97,29 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  p->t = 0;
+  //p->trapframe->epc = p->alarmpc;
+  //printf("sigreturn:trapframe->epc:[%p], sepc:[%p]\n", p->trapframe->epc, r_sepc());
+  memmove(p->trapframe, &p->alarmtrapframe, sizeof(struct trapframe));
+  return 0;
+}
+
+uint64
+sys_sigalarm(void)
+{
+  int t;
+  uint64 p;
+  if(argint(0, &t) < 0|| argaddr(1, &p) < 0){
+    return -1;
+  }
+
+  myproc()->alarmitval = t;
+  myproc()->alarmhdl = p;
+  myproc()->t = 0;
+  return 0;
+} 
