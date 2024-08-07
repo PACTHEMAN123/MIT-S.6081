@@ -65,11 +65,57 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15){
+    // AMO/store page fault
+    uint64 va = r_stval();
+    if(va >= MAXVA || va >= p->sz){
+      p->killed = 1;
+      exit(-1);
+    }
+    //printf("processing cow page fault[%p]\n", va);
+    char *mem;
+    // if it is a cow page
+    pte_t *pte;
+    pte = walk(p->pagetable, PGROUNDDOWN(va), 0);
+    if(pte == 0){
+      p->killed = 1;
+      exit(-1);
+    }
+
+    if((*pte & PTE_COW) == 0 || (*pte & PTE_U) == 0){
+      printf("not a cow page\n");
+      p->killed = 1;
+      exit(-1);
+    }
+
+    // copy the old pages to the new pages
+    uint flags = PTE_FLAGS(*pte);
+    uint64 pa = PTE2PA(*pte);
+    if((mem = kalloc()) == 0){
+      //printf("not enough space\n");
+      p->killed = 1;
+      exit(-1);
+    }
+    memmove(mem, (char *)pa, PGSIZE);
+    flags |= PTE_W;
+    *pte |= PTE_W;
+    uvmunmap(p->pagetable, PGROUNDDOWN(va), 1, 0);
+    kfree((void *)pa);
+    //printf("try to map again to [%d]\n", PGINDEX(mem));
+    if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, flags) != 0){
+      printf("mappages failed in cow\n");
+      p->killed = 1;
+      //kfree(mem);
+    }
+    //printf("sucessfully handle cow page fault\n");
+  } else if(r_scause() == 12 || r_scause() == 13){
+    p->killed = 1;
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+    //panic("stop");
     p->killed = 1;
   }
 

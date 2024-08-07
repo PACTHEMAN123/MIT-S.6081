@@ -164,6 +164,7 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  //printf("freeproc finished\n");
 }
 
 // Create a user page table for a given process,
@@ -229,12 +230,10 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
   // allocate one user page and copy init's instructions
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
-
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -254,7 +253,6 @@ growproc(int n)
 {
   uint sz;
   struct proc *p = myproc();
-
   sz = p->sz;
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
@@ -386,7 +384,7 @@ wait(uint64 addr)
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
-
+//printf("%d call wait\n", p->pid);
   acquire(&wait_lock);
 
   for(;;){

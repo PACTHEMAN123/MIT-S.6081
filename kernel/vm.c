@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -15,6 +17,8 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+extern int ref[]; // page reference count
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -24,7 +28,7 @@ kvmmake(void)
   kpgtbl = (pagetable_t) kalloc();
   memset(kpgtbl, 0, PGSIZE);
 
-  // uart registers
+  // registers
   kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
   // virtio mmio disk interface
@@ -178,10 +182,16 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped");
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
+    
+    //uint64 pa = PTE2PA(*pte);
+    //ref[PGINDEX(pa)] -= 1;
+
     if(do_free){
       uint64 pa = PTE2PA(*pte);
       kfree((void*)pa);
     }
+    
+    //printf("uvmunmap pa:[%p], pgindex:[%d]\n", pa, PGINDEX(pa));
     *pte = 0;
   }
 }
@@ -206,11 +216,13 @@ void
 uvminit(pagetable_t pagetable, uchar *src, uint sz)
 {
   char *mem;
-
+  //printf("uvminit\n");
   if(sz >= PGSIZE)
     panic("inituvm: more than a page");
   mem = kalloc();
+  //printf("uvminit: mempage[%d]\n", PGINDEX(mem));
   memset(mem, 0, PGSIZE);
+  //printf("here\n");
   mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
   memmove(mem, src, sz);
 }
@@ -288,6 +300,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 {
   if(sz > 0)
     uvmunmap(pagetable, 0, PGROUNDUP(sz)/PGSIZE, 1);
+  //printf("uvmfree before freewalk\n");
   freewalk(pagetable);
 }
 
@@ -297,6 +310,9 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 // physical memory.
 // returns 0 on success, -1 on failure.
 // frees any allocated pages on failure.
+
+// old version of uvmcopy
+/*
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
@@ -326,6 +342,48 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
+*/
+// uvmcopy that support cow fork
+int
+uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+
+  for(i = 0; i < sz; i += PGSIZE){
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
+
+    
+    flags = PTE_FLAGS(*pte);
+    if(flags & PTE_W){
+      // clear PTE_W for both parent and child
+      flags &= ~PTE_W;
+      *pte &= ~PTE_W;
+
+      // use RSW to record the cow fork pages
+      flags |= PTE_COW;
+      *pte |= PTE_COW;
+    }
+    
+    // parent and child share all physical pages
+    pa = PTE2PA(*pte);
+    //printf("cow a page:[%d], if cow[%d]\n", PGINDEX(pa), flags&PTE_COW);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
+      goto err;
+    }
+    ref[PGINDEX(pa)] += 1;
+    //printf("uvmcopy pgindex[%d]\n", PGINDEX(pa));
+  }
+  return 0;
+
+ err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
@@ -347,12 +405,47 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
-
+  //printf("call copyout\n");
+  if(dstva >= MAXVA)
+    return -1;
+  
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
+
+    // added cow page fault handle
+    pte_t *pte = walk(pagetable, va0, 0);
+    if(pte == 0)
+      return -1;
+    //printf("copyout pgindex:[%d], if cow[%d]\n", PGINDEX(pa0), pte&PTE_COW);
+    if((*pte & PTE_V) == 0)
+      return -1;
+    
+    if((*pte & PTE_COW)){
+      //printf("get into copyout cow handler\n");
+      // alloc a new page
+      uint flags = PTE_FLAGS(*pte);
+      char *mem;
+      if((mem = kalloc()) == 0){
+        //struct proc *p = myproc();
+        //p->killed = 1;
+        return -1;
+      }
+      memmove(mem, (char *)pa0 ,PGSIZE);
+      flags |= PTE_W;
+      *pte |= PTE_W;
+      flags &= ~PTE_COW;
+      *pte &= ~PTE_COW;
+      uvmunmap(pagetable, PGROUNDDOWN(va0), 1, 0);
+      kfree((void *)pa0);
+      if(mappages(pagetable, va0, PGSIZE, (uint64)mem, flags) != 0){
+        panic("copyout mappages failed");
+      }
+      pa0 = (uint64)mem;
+      //printf("handled a cow\n");
+    }
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
