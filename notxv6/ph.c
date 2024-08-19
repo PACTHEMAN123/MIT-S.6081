@@ -16,6 +16,7 @@ struct entry {
 struct entry *table[NBUCKET];
 int keys[NKEYS];
 int nthread = 1;
+pthread_mutex_t hashlock[NBUCKET];
 
 
 double
@@ -49,10 +50,14 @@ void put(int key, int value)
   }
   if(e){
     // update the existing key.
+    pthread_mutex_lock(&(hashlock[i]));
     e->value = value;
+    pthread_mutex_unlock(&(hashlock[i]));
   } else {
     // the new is new.
+    pthread_mutex_lock(&(hashlock[i]));
     insert(key, value, &table[i], table[i]);
+    pthread_mutex_unlock(&(hashlock[i]));
   }
 
 }
@@ -105,6 +110,10 @@ main(int argc, char *argv[])
   void *value;
   double t1, t0;
 
+  // init the locks
+  for(int i = 0; i < NBUCKET;i++) {
+    pthread_mutex_init(&(hashlock[i]), NULL);
+  }
 
   if (argc < 2) {
     fprintf(stderr, "Usage: %s nthreads\n", argv[0]);
