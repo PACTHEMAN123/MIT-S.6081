@@ -289,6 +289,15 @@ fork(void)
   }
   np->sz = p->sz;
 
+  // copy vmas
+  struct vma *vp;
+  for(int i = 0; i < NVMA; i++){
+    np->vma[i] = p->vma[i];
+    vp = &(np->vma[i]);
+    if(vp->valid)
+      filedup(vp->f);
+  }
+
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -350,6 +359,20 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // Unmap all mapped region
+  struct vma *vp;
+  for(int i = 0; i < NVMA; i++){
+    vp = &(p->vma[i]);
+    if(vp->valid){
+      for(uint64 a = vp->addr; a < vp->addr+vp->length; a += PGSIZE)
+      {
+        if(walkaddr(p->pagetable, a))
+          uvmunmap(p->pagetable, a, 1, 0);
+      }
+      vp->valid = 0;
     }
   }
 

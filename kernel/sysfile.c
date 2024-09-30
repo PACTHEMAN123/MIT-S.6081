@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -482,5 +483,160 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  int length;
+  uint64 addr;
+  int prot;
+  int flags;
+  int fd;
+  int offset;
+  struct file *f;
+  
+  if(argint(1, &length) < 0 || argint(2, &prot) < 0 
+    || argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0
+    || argint(5, &offset) < 0)
+    return -1;
+
+  if((!f->readable && (prot & PROT_READ))
+    || (!f->writable && (prot & PROT_WRITE) && !(flags & MAP_PRIVATE)))
+    return -1;
+
+  // find an empty vma and calculate the lowest addr
+  addr = TRAPFRAME;
+  struct proc *p = myproc();
+  struct vma *vp = 0; 
+  for(int i = 0; i < NVMA; i++){
+    if(p->vma[i].valid == 0 && vp == 0){
+      vp = &(p->vma[i]);
+    }
+    if(p->vma[i].valid == 1){
+      if(p->vma[i].addr < addr)
+        addr = p->vma[i].addr;
+    }
+  }
+
+  // fill in the vma structure
+  vp->valid = 1;
+  vp->length = PGROUNDUP(length);
+  vp->addr = addr - PGROUNDUP(length);
+  vp->f = f;
+  vp->prot = prot;
+  vp->offset = offset;
+  vp->flags = flags;
+  
+  // increase file ref count
+  filedup(f);
+
+  return vp->addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+
+  // find vma for the addr.
+  struct vma *vp;
+  int i;
+  for(i = 0; i < NVMA; i++){
+    vp = &(p->vma[i]);
+    if(vp->valid){
+      if(addr >= vp->addr && addr < vp->addr + vp->length)
+        break;
+    }
+  }
+  if(i == NVMA)
+    return -1;
+
+  // write back and unmap pages.
+  // assume addr is page-aligned.
+  length = PGROUNDUP(length);
+  if(vp->flags & MAP_SHARED){
+    begin_op();
+    ilock(vp->f->ip);
+    writei(vp->f->ip, 1, addr, addr - vp->addr, length);
+    iunlock(vp->f->ip);
+    end_op();
+  }
+  
+  if(walkaddr(p->pagetable, addr) != 0){
+    uvmunmap(p->pagetable, addr, length/PGSIZE, 1);
+  }
+  
+  vp->length -= length;
+  if(addr == vp->addr){
+    // cut the head
+    vp->offset += length; 
+    vp->addr = addr + length;
+  }
+
+  // if munmap removes all pages,
+  // ref of file should decret.
+  if(vp->length == 0){
+    vp->f->ref -=1;
+    vp->valid = 0;
+  }
+    
+
+  return 0;
+}
+
+int
+mmap_handler(uint64 va)
+{
+  struct proc *p = myproc();
+  //printf("into mmap handler\n");
+  
+  // check if va inside mmap region
+  int i;
+  struct vma *vp;
+  for(i = 0; i < NVMA; i++){
+    vp = &(p->vma[i]);
+    if(vp->valid){
+      if(va >= vp->addr && va < vp->addr + vp->length)
+        break;
+    }
+  }
+  if(i == NVMA)
+    return -1;
+  
+  // kalloc a page
+  char *mem;
+  if((mem = kalloc()) == 0){
+    panic("mmap failed to kalloc a page");
+  }
+  memset((void*)mem, 0, PGSIZE);
+
+  // read the file into the page
+  begin_op();
+  ilock(vp->f->ip);
+  readi(vp->f->ip, 0, (uint64)mem, PGROUNDDOWN(va - vp->addr), PGSIZE);
+  iunlock(vp->f->ip);
+  end_op();
+
+  // map the physical page to user page
+  uint flags;
+  flags = PTE_U;
+  if(vp->prot & PROT_READ)
+    flags |= PTE_R;
+  if(vp->prot & PROT_WRITE)
+    flags |= PTE_W;
+  if(vp->prot & PROT_EXEC)
+    flags |= PTE_X;
+
+  if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, flags) != 0){
+    panic("mmap mappages failed");
+  }
+
   return 0;
 }
